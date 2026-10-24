@@ -91,6 +91,7 @@ Convites por e-mail dependem da configuração de e-mail do Supabase. O provedor
 - Os uploads via API aceitam arquivos de imagem até 4 MB e checam o tamanho do corpo antes de interpretar o multipart, respeitando o limite de 4,5 MB de uma Vercel Function. Para imagens maiores, planejar upload direto ao Supabase Storage com autorização temporária.
 - `next.config.ts` define `nosniff`, `Referrer-Policy`, `Permissions-Policy` e `X-Frame-Options: SAMEORIGIN` para preservar o preview do admin em iframe. CSP fica para uma etapa de observação/teste, porque a página de referência usa CSS e scripts inline.
 - Antes do deploy, confirme as migrations do Supabase, a URL de retorno de convite, e-mail/SMTP e o estado publicado do conteúdo. As rotas de dados e conteúdo continuam dependentes das variáveis do servidor.
+- Pendente de validação: testar em produção os fluxos de convite de usuário e redefinição de senha, incluindo os links de retorno e o envio pelo SMTP configurado.
 
 ## Estrutura
 
