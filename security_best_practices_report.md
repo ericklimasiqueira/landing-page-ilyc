@@ -1,35 +1,69 @@
-# Revisão de segurança e desempenho — ILYC
+# Revisão de segurança — ILYC
 
 **Data:** 24/10/2026
-**Escopo:** Next.js App Router, autenticação Supabase, APIs, uploads e preparação para Vercel.
+**Escopo:** código Next.js/Supabase, configuração de headers, APIs administrativas, upload de imagens, migrations versionadas e respostas da implantação pública `landing-page-ilyc.vercel.app`.
+**Limite:** revisão estática e probes HTTP sem sessão. Não tive acesso ao painel da Vercel nem ao estado efetivamente aplicado do banco; as policies foram revisadas nos arquivos de migration.
 
-## Ajustes realizados
+## Resultado
 
-- A rota pública agora impede que produção receba conteúdo não publicado e não cria URLs assinadas para esses rascunhos. A landing apresenta estado de preparação sem exibir o HTML-base. No desenvolvimento local, o preview de rascunho segue disponível.
-- A autorização privilegiada consulta `auth.getUser()` e o `app_metadata.role` atual em cada operação, evitando manter acesso baseado em papel antigo ainda presente no JWT.
-- A API pública e a área administrativa carregam as fotos em lote e agrupam resultados em memória, reduzindo a sequência de queries e chamadas de assinatura individual.
-- `next.config.ts` define `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` e `X-Frame-Options: SAMEORIGIN`, preservando o iframe do preview.
-- Upload confere `Content-Length` antes de interpretar multipart, limita o arquivo a 4 MB e verifica a assinatura binária do tipo de imagem.
-- A Vercel documenta máximo de 4,5 MB para corpo de request e response de Function ([limites de Functions](https://vercel.com/docs/functions/limitations)). Para imagens maiores, a evolução indicada é upload direto ao Supabase Storage com autorização temporária.
+Não encontrei uma rota administrativa acessível sem sessão nem alertas conhecidos nas dependências auditadas. As rotas de conteúdo e usuários responderam `401` sem autenticação na produção. O banco usa RLS nas tabelas de conteúdo e bucket privado conforme as migrations do repositório.
 
-## Pendências antes de uma publicação pública
+## Achados
 
-- CSP não foi adicionada: o HTML-base usa scripts e estilos inline. Antes de definir a política, testar em modo `Report-Only` numa implantação para não quebrar a landing.
-- Não foi implementado rate limit em memória porque instâncias serverless não compartilham o estado. Um limite confiável e trilha de auditoria precisam de armazenamento compartilhado e uma migration própria.
-- Configurar MFA para administradores, SMTP e URL de redirecionamento de convites no Supabase.
-- Conferir no Dashboard que as migrations e políticas RLS aplicadas correspondem às versões do projeto.
-- Confirmar domínio, variáveis de ambiente e publicação explícita de `site_settings` na Vercel.
+### SEC-01 — CSP ausente — Baixa, defesa em profundidade
 
-## Controles já existentes
+- **Evidência:** `next.config.ts` configura headers de segurança, mas não `Content-Security-Policy`. A landing legada tem scripts e estilos inline, o que exige uma política compatível.
+- **Impacto:** se uma falha de injeção de conteúdo surgir no futuro, o navegador não terá CSP para limitar a execução de scripts e o carregamento de recursos.
+- **Correção recomendada:** testar `Content-Security-Policy-Report-Only` numa implantação e depois adotar CSP por nonce/hash, evitando liberar scripts inline de forma ampla.
+- **Estado:** `Content-Security-Policy-Report-Only` configurada no projeto com as origens do próprio app, do Supabase e das fontes Google usadas pela landing. Essa política não bloqueia recursos; violações aparecem no console do navegador. CSP efetiva com nonce/hash continua pendente de análise das violações, especialmente dos scripts inline de hidratação do Next.
 
-- `SUPABASE_SECRET_KEY` é lida por módulo `server-only`, sem prefixo `NEXT_PUBLIC_`.
-- `.gitignore` exclui arquivos `.env*`, exceto `.env.example`.
-- Rotas administrativas verificam autenticação e papel no servidor; gestão de usuários exige `admin`, edição aceita `admin` e `editor`, e mutações verificam origem same-origin.
-- Bucket de imagens privado e RLS permanecem habilitados nas migrations.
+### SEC-02 — Limite de frequência para ações de e-mail — Baixa
 
-## Verificações
+- **Evidência:** as rotas de convite e reset de senha exigem papel `admin` e validação de origem. Foi implementado um rate limit compartilhado e atômico no Postgres: 10 ações por hora e 30 por dia por administrador e por tipo de ação.
+- **Impacto:** uma conta administrativa comprometida poderia disparar muitos convites ou resets e consumir a cota do provedor de e-mail.
+- **Correção:** migration `20261024230000_admin_email_rate_limit.sql` cria os contadores, limita execução da função ao `service_role` e registra tentativas/resultados sem armazenar e-mails. Respostas limitadas retornam `429` e `Retry-After`.
+- **Estado:** código pronto; a migration ainda precisa ser aplicada no Supabase para os envios voltarem a funcionar. A aplicação falha fechada se o rate limit ou o registro de auditoria não estiver disponível.
+- **Mitigação atual:** a operação continua restrita a admins autenticados; o endpoint não é público.
 
-- `npm audit --omit=dev --audit-level=moderate`: 0 vulnerabilidades de produção conhecidas na execução anterior.
-- `npm run lint`: passou após as alterações.
-- `npm run build`: passou após as alterações.
-- A implantação Vercel, configuração Auth/MFA e estado atual das policies não foram inspecionados no Dashboard.
+### SEC-03 — Sessão Supabase compartilhada na conversa — Alta, ação operacional
+
+- **Evidência:** um cURL anterior nesta conversa continha cookie de sessão com access e refresh token.
+- **Impacto:** quem obtiver esse valor enquanto válido pode tentar reutilizar a sessão daquele usuário.
+- **Ação recomendada:** encerrar sessões ativas desse usuário no Supabase Auth e autenticar novamente. Não reutilizar o cookie do cURL.
+- **Nota:** este achado diz respeito a credencial compartilhada na conversa, não a uma exposição encontrada no site público.
+
+## Controles verificados
+
+- As APIs administrativas de conteúdo e usuários responderam `401` sem sessão na implantação.
+- A autorização do servidor valida o usuário atual no Supabase e o papel em `app_metadata`; gestão de usuários requer `admin`.
+- Escritas administrativas verificam origem; mídia valida papel, tamanho, tipo MIME e assinatura binária e restringe caminhos gerados pelo servidor.
+- O bucket `ilyc-portfolio` é privado nas migrations. RLS está habilitada nas tabelas de conteúdo; policies concedem leitura pública somente para conteúdo publicado e gestão a `admin`/`editor`.
+- `.env*` está no `.gitignore`; apenas `.env.example` pode ser versionado. `SUPABASE_SECRET_KEY` é lida num módulo `server-only`.
+- `npm audit` encontrou **0 vulnerabilidades conhecidas** nas 447 dependências resolvidas (27 produção, 383 desenvolvimento e 88 opcionais), nesta execução.
+- O cabeçalho CSP está somente em modo `Report-Only`; ele não bloqueia recursos e não envia relatórios para armazenamento remoto. Inspecionar as violações no console durante uma implantação.
+- A resposta pública da API usa `Cache-Control: no-store`; conteúdo não publicado não é enviado em produção.
+- Headers presentes na produção durante a inspeção: `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `X-Frame-Options: SAMEORIGIN` e `Permissions-Policy`.
+- HSTS e CSP `Report-Only` estão configurados localmente; a implantação ainda precisa ser atualizada para esses dois headers chegarem à produção.
+
+## Alteração de URL
+
+- `/ilyc-landing-page-select-ensaio.html` redireciona permanentemente para `/`.
+- O preview interno usa `/landing`, reescrito para o HTML existente.
+- A URL `.html` antiga continua como entrada compatível e encaminha visitantes para a raiz.
+
+## Verificações executadas
+
+- `npm audit --json`: 0 vulnerabilidades conhecidas.
+- `npm run lint`: passou.
+- `npx tsc --noEmit`: passou após regenerar os tipos de rota do Next com `next typegen`.
+- `git diff --check`: passou.
+- Produção: `/` e o HTML antigo responderam `200` antes da alteração local; `/api/admin/content` e `/api/admin/users` responderam `401` sem sessão.
+- Local: `/` e `/landing` responderam `200`; o arquivo `.html` respondeu `308` para `/`; as duas APIs administrativas responderam `401`.
+
+## Pendências operacionais
+
+- Publicar as mudanças para o redirecionamento valer na Vercel e confirmar os headers após o deploy.
+- Confirmar no Supabase Dashboard que as migrations/policies do banco correspondem ao repositório.
+- Confirmar HSTS e CSP `Report-Only` após o deploy.
+- Aplicar `20261024230000_admin_email_rate_limit.sql` no Supabase antes de testar convite/reset autenticados.
+- Revisar violações CSP no console da implantação e depois planejar CSP com nonce/hash; habilitar MFA para administradores.
