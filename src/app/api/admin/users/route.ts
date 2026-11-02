@@ -1,4 +1,5 @@
 import { getAdminAccess } from "@/lib/server/admin-auth";
+import { consumeAdminEmailRateLimit, recordAdminEmailAction } from "@/lib/server/email-rate-limit";
 import { getAuthCallbackUrl } from "@/lib/server/auth-redirect";
 import { isSameOriginRequest } from "@/lib/server/request-origin";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -65,20 +66,36 @@ export async function POST(request: Request) {
 
   try {
     const admin = createSupabaseAdminClient();
+    const rateLimit = await consumeAdminEmailRateLimit(admin, authorization.userId, "invite");
+    if (!rateLimit) return Response.json({ error: "A proteção de envio está indisponível. Tente novamente mais tarde." }, { status: 503, headers: noStore });
+    if (!rateLimit.allowed) {
+      await recordAdminEmailAction(admin, { adminUserId: authorization.userId, action: "invite", outcome: "rate_limited" });
+      return Response.json(
+        { error: "Limite de convites atingido. Tente novamente mais tarde.", retryAfterSeconds: rateLimit.retryAfterSeconds },
+        { status: 429, headers: { ...noStore, "Retry-After": String(rateLimit.retryAfterSeconds) } },
+      );
+    }
+
+    const auditStarted = await recordAdminEmailAction(admin, { adminUserId: authorization.userId, action: "invite", outcome: "attempted" });
+    if (!auditStarted) return Response.json({ error: "Não foi possível registrar a ação de segurança. O convite não foi enviado." }, { status: 503, headers: noStore });
     const { data, error } = await admin.auth.admin.inviteUserByEmail(email, {
       redirectTo: getAuthCallbackUrl(request),
     });
 
     if (error || !data.user) {
+      await recordAdminEmailAction(admin, { adminUserId: authorization.userId, action: "invite", outcome: "failed" });
       const status = error?.code === "email_exists" || error?.code === "user_already_exists" ? 409 : 502;
       return Response.json({ error: status === 409 ? "Esse e-mail já tem uma conta." : "Não foi possível enviar o convite. Confira a configuração de e-mail do Supabase." }, { status, headers: noStore });
     }
+
+    await recordAdminEmailAction(admin, { adminUserId: authorization.userId, targetUserId: data.user.id, action: "invite", outcome: "sent" });
 
     const { data: updated, error: roleError } = await admin.auth.admin.updateUserById(data.user.id, {
       app_metadata: { ...data.user.app_metadata, role },
     });
 
     if (roleError || !updated.user) {
+      await recordAdminEmailAction(admin, { adminUserId: authorization.userId, targetUserId: data.user.id, action: "invite", outcome: "role_assignment_failed" });
       return Response.json({ error: "O convite foi criado, mas não foi possível aplicar a permissão. Peça a um administrador para revisar essa conta." }, { status: 502, headers: noStore });
     }
 

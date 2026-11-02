@@ -3,7 +3,7 @@ export default function Home() {
     <main className="landing-preview">
       <iframe
         className="landing-frame"
-        src="/ilyc-landing-page-select-ensaio.html"
+        src="/landing"
         title="Landing page Ilyc — ensaios fotográficos"
       />
     </main>
